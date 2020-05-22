@@ -1,0 +1,212 @@
+---
+title: "Human Breast Single cell - Imprinted genes"
+author: "Paolo Martini"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages(library(rbrewerix))
+```
+
+We load the table and extract the imprinted genes i.e. those genes that are not in the sexual chromosomes.
+
+```{r}
+if (file.exists("brewer-table.RData")) {
+  load("brewer-table.RData")
+} else {
+  brewer_table <- read_guess_loi_table("brewer-table.txt.gz")
+  save(brewer_table, file="brewer-table.RData")
+}
+
+igenes_bt <- extract_chromosomes(brewer_table, chrs = c("X", "Y"), invert_selection = T)
+```
+
+We import single cell annotations from literature (GEO database). Specifically we import the label of the type of cell.
+
+```{r}
+add_infos <- read.table("515_samples_annotation.txt", header=F, stringsAsFactors = F, check.names = F)
+add_infos <- add_infos[,c(1:3)]
+colnames(add_infos) <- c("gsm", "patients_id", "cell_type")
+row.names(add_infos) <- add_infos$gsm
+```
+
+We create a pheno data with the annotations and the column names.
+
+```{r}
+patients <- sapply(strsplit(colnames(igenes_bt$ar), "_"), function(x) x[2])
+gsm <- sapply(strsplit(colnames(igenes_bt$ar), "_"), function(x) x[1])
+add_infos <- add_infos[gsm, ]
+
+pheno <- data.frame(cns=colnames(igenes_bt$ar),
+                    gsm, patients, cell_type=add_infos$cell_type,
+                    patient_cell_type=paste(patients, add_infos$cell_type, sep="_"),
+                    stringsAsFactors = F, check.names = F)
+```
+
+We need to count how many patients have a sufficient number of cell to be anlyzed: we want to compare non-tumor and tumor cells so _we kept those patients with more than 8 cell in both tumor and non tumor cells_
+
+```{r}
+cell_counts <- table(pheno[,c("patients", "cell_type")])
+keep_patients <- names(which(apply(cell_counts >= 8, 1, all)))
+pheno <- pheno[pheno$patients %in% keep_patients, , drop=F]
+```
+
+We reduced the dataset to the samples with sufficient number of cells and perform gene summary.
+
+```{r}
+
+igenes_bt_s <- filter_samples_from_guess_loi_table(igenes_bt, keep_samples = pheno$cns)
+summarized_genes <- summarize_table_by_genes(igenes_bt_s, thr=0.2, odepth=20, min_ac=4, min_number_of_sig_SNP = 1)
+
+```
+
+We are going to group by patients. As previously stated, we kept patients with at least 8 cell analyzed in both tumor and non tumor category. Given the low number of cells we analyze the genes that are expressed in at least 10% of the expressing cells. Considering that the mean number of cell analyzed is 21, we analyzed cell expressed in at least 2 cell (10% of 21 rounded).
+
+```{r}
+table(pheno$patient_cell_type)
+```
+
+Average `r mean(table(pheno$patient_cell_type))`.
+
+```{r}
+cwise_cell_exps_genes <- tapply(pheno$cns, pheno$patient_cell_type, function(idx) {
+  apply(summarized_genes$gene_all_snvs[, idx,drop=F] > 0, 1, sum, na.rm=T)
+})
+
+cwise_cell_with_gene_bial <- tapply(pheno$cns, pheno$patient_cell_type, function(idx) {
+  apply(summarized_genes$gene_aar[, idx,drop=F] >=0.2, 1, sum, na.rm=T)
+})
+
+ncell_thr=2
+
+for (name in unique(pheno$patient_cell_type)){
+  sel <- cwise_cell_exps_genes[[name]] < ncell_thr
+  cwise_cell_with_gene_bial[[name]][sel] <- 0
+  cwise_cell_exps_genes[[name]][sel] <- 0
+}
+
+cwise_bi_cell_count <- mapply('/', cwise_cell_with_gene_bial, cwise_cell_exps_genes, SIMPLIFY = F)
+cwise_bi_cell_count <- do.call(cbind, cwise_bi_cell_count)
+cwise_bi_cell_count <- data.frame(gene=summarized_genes$annotation$symbol, cwise_bi_cell_count*100, stringsAsFactors = F, check.names = F)
+
+cwise_bi_cell_count_verbose <- mapply(paste, cwise_cell_with_gene_bial, cwise_cell_exps_genes, sep=":", SIMPLIFY = F)
+cwise_bi_cell_count_verbose <- do.call(cbind, cwise_bi_cell_count_verbose)
+cwise_bi_cell_count_verbose <- data.frame(gene=summarized_genes$annotation$symbol,
+                                          cwise_bi_cell_count_verbose,
+                                          stringsAsFactors = F, check.names = F)
+
+cwise_bi_cell_count$gene <- factor(cwise_bi_cell_count$gene, levels=rev(cwise_bi_cell_count$gene))
+cwise_bi_cell_count_verbose$gene <- factor(cwise_bi_cell_count_verbose$gene, 
+                                           levels=rev(cwise_bi_cell_count_verbose$gene))
+
+```
+
+```{r}
+cellPerc = 20
+```
+
+We keep the gene with at least `r cellPerc`% of cells with LOI events in at least one patient category (we keep those genes with a maximun 6 NA per line).
+
+```{r}
+selection_NA <- apply(is.na(cwise_bi_cell_count[,-c(1)]), 1, sum) <= 6 
+selection_exp <- apply(cwise_bi_cell_count[,-c(1)]>=cellPerc, 1, sum, na.rm=T) > 1
+selection <- selection_NA & selection_exp
+
+cwise_bi_cell_count <- droplevels(cwise_bi_cell_count[selection, ])
+
+# write.table(cwise_bi_cell_count, file="table-fig-2G-igenes-20-4-gt1-20pc-2cell.tsv",
+#             quote=F, row.names = F, sep="\t")
+
+cwise_bi_cell_count_verbose_selected <- droplevels(cwise_bi_cell_count_verbose[selection, ])
+# write.table(cwise_bi_cell_count_verbose_selected,
+#             file="table-fig-2G-igenes-20-4-gt1-20pc-2cell-explain.tsv",
+#             quote=F, row.names = F, sep="\t")
+
+```
+
+We create an order for genes based on the differences between tumor and non tumor samples.
+
+```{r}
+tumor_samples <- grepl("_Tumor", colnames(cwise_bi_cell_count))
+non_tumor_samples <- grepl("_nonTumor", colnames(cwise_bi_cell_count))
+
+nan2zero <- function(x) {
+  x[is.na(x)] <- 0
+  x
+}
+
+foldChangeTumor <- apply(cwise_bi_cell_count, 1, function(profile) {
+  x=mean(as.numeric(profile[tumor_samples]), na.rm=T)
+  y=mean(as.numeric(profile[non_tumor_samples]), na.rm=T)
+  if (y==0 & x==0)
+    return(-1)
+  if (y==0)
+    return(30)
+  if (x == 0)
+    return(0.04)
+  
+  x/y
+})
+
+diffTumor <- apply(cwise_bi_cell_count, 1, function(profile) {
+  x=mean(as.numeric(profile[tumor_samples]), na.rm=T)
+  y=mean(as.numeric(profile[non_tumor_samples]), na.rm=T)
+  x-y
+})
+
+# cbind(foldChangeTumor, log2(foldChangeTumor))
+
+gene_sorter <- data.frame(gene=cwise_bi_cell_count$gene, diff=abs(diffTumor), fc=foldChangeTumor, lfc=abs(log2(foldChangeTumor)), stringsAsFactors = F)
+
+gene_sorter <- gene_sorter[order(gene_sorter$lfc, decreasing = T), ]
+
+```
+
+We now create the plot. 
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+dataplot <- gather(cwise_bi_cell_count, cond, cellPerc, -c("gene"))
+dataplot <- droplevels(dataplot)
+
+explicit_data <- gather(cwise_bi_cell_count_verbose_selected, cond, bi_vs_tot, -c("gene"))
+explicit_data <- droplevels(explicit_data)
+
+if (identical(dataplot$gene, explicit_data$gene))
+  dataplot$bi_vs_tot <- explicit_data$bi_vs_tot
+
+gene_order <- as.character(gene_sorter$gene)
+dataplot$gene <- factor(as.character(dataplot$gene), levels=rev(gene_order))
+
+patient_type <- do.call(rbind, strsplit(dataplot$cond, "_"))
+dataplot$patient <- patient_type[,1]
+dataplot$type <- patient_type[,2]
+
+```
+
+```{r}
+fig2G_core <- ggplot(dataplot, aes(x=patient, y=gene, fill=cellPerc)) +
+  geom_tile() +
+  facet_grid(cols=vars(type), drop=F, scales = "free_x") + 
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, size=14, hjust=0, vjust=0.5), text = element_text(size=12)) +
+  theme(axis.text.x.top = element_text(vjust = 0.5))+
+  scale_fill_gradientn(colors=RColorBrewer::brewer.pal(9, "Blues"), na.value = "grey80", 
+                       limits=c(0,100)) +
+  scale_x_discrete(position = "top") +
+  theme(legend.justification="top")
+
+verbose_labs <- function(){
+  list(labs(fill="% cells\nbi-allelic", x="Patient",y="Genes"))
+}
+fig2G_core + verbose_labs()
+
+```
+
