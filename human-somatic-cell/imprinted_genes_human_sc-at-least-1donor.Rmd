@@ -1,0 +1,151 @@
+---
+title: "Human Santoni - Garieri Single cell - Imprinted genes"
+author: "Paolo Martini"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages(library(rbrewerix))
+```
+
+We load the table and extract the imprinted genes i.e. those genes that are not in the sexual chromosomes.
+
+```{r}
+if (file.exists("brewer_table.RData")) {
+  load("brewer_table.RData")
+} else {
+  brewer_table <- rbrewerix::read_guess_loi_table("brewer-table.txt.gz")
+  save(brewer_table, file="brewer_table.RData")
+}
+
+igene_bt <- rbrewerix::extract_chromosomes(brewer_table, chrs = c("X", "Y"), invert_selection = T)
+```
+
+We summarized the SNV values by genes using default parameter and requiring at least one bi-allelic SNV per gene to consider LOI events.
+
+```{r}
+summarized_genes <- rbrewerix::summarize_table_by_genes(igene_bt, thr=0.2, odepth=20, min_ac=4, min_number_of_sig_SNP = 1)
+```
+
+Fram the sample names, we extract the patients' IDs and create a pheno data.
+
+```{r}
+patients <- sapply(strsplit(colnames(summarized_genes$gene_aar), "_"), function(x) x[1])
+pheno <- data.frame(cns=colnames(summarized_genes$gene_aar),
+                    patients, stringsAsFactors = F, check.names = F)
+table(pheno$patients)
+```
+
+All patients but one have more than 100 cell profiles.
+
+For each patient, we count the cells that show LOI for any given imprinted gene that is expressed.
+To be considered expressed, at least one SNV must be covered by an "overall depth" number of reads.
+
+A gene must be expressed in at least 10 cell to be taken into consideration.
+
+```{r}
+cwise_cell_exps_genes <- tapply(pheno$cns, pheno$patients, function(idx) {
+  apply(summarized_genes$gene_all_snvs[, idx,drop=F] > 0, 1, sum, na.rm=T)
+})
+
+cwise_cell_with_gene_bial <- tapply(pheno$cns, pheno$patients, function(idx) {
+  apply(summarized_genes$gene_aar[, idx,drop=F] >=0.2, 1, sum, na.rm=T)
+})
+
+ncell_thr=10
+for (name in unique(pheno$patients)){
+  sel <- cwise_cell_exps_genes[[name]] < ncell_thr
+  cwise_cell_with_gene_bial[[name]][sel] <- 0
+  cwise_cell_exps_genes[[name]][sel] <- 0
+}
+
+cwise_bi_cell_count <- mapply('/', cwise_cell_with_gene_bial, cwise_cell_exps_genes, SIMPLIFY = F)
+cwise_bi_cell_count <- do.call(cbind, cwise_bi_cell_count)
+cwise_bi_cell_count <- data.frame(gene=summarized_genes$annotation$symbol, cwise_bi_cell_count*100, stringsAsFactors = F, check.names = F)
+
+cwise_bi_cell_count_verbose <- mapply(paste, cwise_cell_with_gene_bial, cwise_cell_exps_genes, sep=":", SIMPLIFY = F)
+cwise_bi_cell_count_verbose <- do.call(cbind, cwise_bi_cell_count_verbose)
+cwise_bi_cell_count_verbose <- data.frame(gene=summarized_genes$annotation$symbol,
+                                          cwise_bi_cell_count_verbose,
+                                          stringsAsFactors = F, check.names = F)
+
+```
+
+For visualization purpose, we sort the genes by average percentage of LOI events across individuals.
+
+```{r}
+overall_perc <- rowSums(cwise_bi_cell_count[, -c(1)], na.rm=T)
+overall_perc <- overall_perc/ncol(cwise_bi_cell_count[, -c(1)])
+
+sortby <- order(overall_perc, decreasing = T)
+overall_perc <- overall_perc[sortby]
+
+cwise_bi_cell_count <- cwise_bi_cell_count[sortby, ]
+cwise_bi_cell_count$gene <- factor(cwise_bi_cell_count$gene, levels=rev(cwise_bi_cell_count$gene))
+
+cwise_bi_cell_count_verbose <- cwise_bi_cell_count_verbose[sortby, ]
+cwise_bi_cell_count_verbose$gene <- factor(cwise_bi_cell_count_verbose$gene, 
+                                           levels=rev(cwise_bi_cell_count_verbose$gene))
+
+```
+
+```{r}
+cellPerc = 20
+```
+
+We keep the genes with at least `r cellPerc`% of cells with LOI events in at least one patients (only one NA per line allowed).
+
+```{r}
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(ggplot2))
+
+select <- apply(cwise_bi_cell_count[,-1] >= cellPerc, 1, sum, na.rm=T) >= 1 # keep lines with at least one value above cellPerc
+select_NA <- apply(is.na(cwise_bi_cell_count[,-1]), 1, sum) < 2 # keep lines with 1 NA at max
+select <- select & select_NA
+
+cwise_bi_cell_count_selected <- cwise_bi_cell_count[select, ]
+# write.table(cwise_bi_cell_count_selected,
+#             file="table-fig-2D-igenes-20-4-gt1-20pc-10cell-1donor.tsv",
+#             quote=F, row.names = F, sep="\t")
+
+cwise_bi_cell_count_verbose_selected <- cwise_bi_cell_count_verbose[select, ]
+# write.table(cwise_bi_cell_count_verbose_selected,
+#             file="table-fig-2D-igenes-20-4-gt1-20pc-10cell-1donor-explain.tsv",
+#             quote=F, row.names = F, sep="\t")
+
+```
+
+With this data, we create the plot.
+
+```{r}
+dataplot <- gather(cwise_bi_cell_count[select, ], cond, cellPerc, -c("gene"))
+dataplot <- droplevels(dataplot)
+
+explicit_data <- gather(cwise_bi_cell_count_verbose_selected, cond, bi_vs_tot, -c("gene"))
+explicit_data <- droplevels(explicit_data)
+
+if (identical(dataplot$gene, explicit_data$gene))
+  dataplot$bi_vs_tot <- explicit_data$bi_vs_tot
+
+
+fig2D_core <- ggplot(dataplot, aes(x=cond, y=gene, fill=cellPerc)) +
+  geom_tile() +
+  coord_fixed(ratio = 0.7)+
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90), text = element_text(size=12)) +
+  scale_fill_gradientn(colors=RColorBrewer::brewer.pal(9, "Blues"), na.value = "grey80",
+                       limits=c(0,100)) +
+  scale_x_discrete(position = "top")
+
+verbose_labs <- function(){
+  list(labs(fill="% cells\nbi-allelic", x="Patient",y="Imprinted genes"))
+}
+
+fig2D_core + verbose_labs()
+```
+
