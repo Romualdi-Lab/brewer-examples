@@ -1,0 +1,134 @@
+---
+title: "Analysis of data E-MTAB-2600 single cells - Additional Info"
+author: "Paolo Martini"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages(library(rbrewerix))
+```
+
+We load the brewer-table and select only imprinted genes (i.e. we eclude "X" and "Y" Chrs).
+```{r}
+brewer_table <- rbrewerix::read_guess_loi_table("brewer-table.txt.gz")
+igenes_bt <- rbrewerix::extract_chromosomes(brewer_table, chrs = c("X", "Y"), invert_selection = T)
+igenes_bt <- rbrewerix::filter_guess_loi_table(igenes_bt, keep_source = c("A","B"))
+```
+
+We summarized by genes.
+N.B. We asked at least one bi-allelic SNV.
+
+```{r}
+summarized_genes <- rbrewerix::summarize_table_by_genes(igenes_bt, thr=0.2, odepth=20, min_ac=4, min_number_of_sig_SNP = 1)
+```
+
+We infer the classes from the column names in the guess_loi_table. Colnames are in the form `r colnames(summarized_genes$gene_all_snvs)[1]` i.e. "_" separated "media", "experiment" and "serial". We split the 3 pieces of information and keep only the "media" to create a pheno data frame.
+
+```{r}
+classes <- sapply(strsplit(colnames(summarized_genes$gene_all_snvs), "_"), function(x) {
+    return(gsub("[0-9]$","", x[1],perl=T))
+})
+
+pheno <- data.frame(cns=colnames(summarized_genes$gene_all_snvs), classes, stringsAsFactors = F, check.names = F)
+table(classes)
+
+```
+
+Overall we analyzed 384 single cell from 2i media and 288 from serum.
+ 
+We now count the percentage of cells that show LOI for each genes.
+To see a LOI the gene must be expressed by the cell.
+To be expressed, we require that at least one SNP is evaluated (i.e. one SNV count above overall depth).
+
+```{r}
+ncell_thr=10
+```
+
+We are going to group by colturing condition and count for each gene the number of expression cell.
+To be umbiased on the analysis, to analyze a gene profile we require at least `r ncell_thr` cell expressing the genes.
+
+```{r}
+cwise_cell_exps_genes <- tapply(pheno$cns, pheno$classes, function(idx) {
+  apply(summarized_genes$gene_all_snvs[, idx,drop=F] > 0, 1, sum, na.rm=T)
+})
+
+cwise_cell_with_gene_bial <- tapply(pheno$cns, pheno$classes, function(idx) {
+  apply(summarized_genes$gene_aar[, idx,drop=F] >= 0.2, 1, sum, na.rm=T)
+})
+
+for (name in unique(pheno$classes)){
+  sel <- cwise_cell_exps_genes[[name]] < ncell_thr
+  cwise_cell_with_gene_bial[[name]][sel] <- 0
+  cwise_cell_exps_genes[[name]][sel] <- 0
+}
+
+cwise_bi_cell_count <- mapply('/', cwise_cell_with_gene_bial, cwise_cell_exps_genes, SIMPLIFY = F)
+cwise_bi_cell_count <- do.call(cbind, cwise_bi_cell_count)
+cwise_bi_cell_count <- data.frame(gene=summarized_genes$annotation$symbol, cwise_bi_cell_count*100, stringsAsFactors = F, check.names = F)
+
+cwise_bi_cell_count_verbose <- mapply(paste, cwise_cell_with_gene_bial, cwise_cell_exps_genes, sep=":", SIMPLIFY = F)
+cwise_bi_cell_count_verbose <- do.call(cbind, cwise_bi_cell_count_verbose)
+cwise_bi_cell_count_verbose <- data.frame(gene=summarized_genes$annotation$symbol,
+                                          cwise_bi_cell_count_verbose,
+                                          stringsAsFactors = F, check.names = F)
+```
+
+For visualization purpose, we sort the genes by average percentage of LOI events across individuals.
+
+```{r}
+overall_perc <- rowMeans(cwise_bi_cell_count[, -c(1)], na.rm=T)
+sortby <- order(overall_perc, decreasing = T)
+overall_perc <- overall_perc[sortby]
+
+cwise_bi_cell_count <- cwise_bi_cell_count[sortby, ]
+cwise_bi_cell_count$gene <- factor(cwise_bi_cell_count$gene, levels=rev(cwise_bi_cell_count$gene))
+
+cwise_bi_cell_count_verbose <- cwise_bi_cell_count_verbose[sortby, ]
+cwise_bi_cell_count_verbose$gene <- factor(cwise_bi_cell_count_verbose$gene, 
+                                           levels=rev(cwise_bi_cell_count_verbose$gene))
+```
+
+```{r}
+cellPerc = 20
+```
+
+We keep the gene with at least `r cellPerc`% of cells with LOI events in at least one class.
+
+```{r}
+select <- apply(cwise_bi_cell_count[,-1] >= cellPerc, 1, sum, na.rm=T) >= 1 # keep lines with at least one value above cellPerc
+select[is.na(select)] <- F
+
+cwise_bi_cell_count_selected <- cwise_bi_cell_count[select, ]
+
+colnames(cwise_bi_cell_count_selected)[2:3] <- c("2i/L", "S/L")
+```
+
+We prepare the plot.
+
+```{r}
+library(tidyr)
+library(ggplot2)
+
+dataplot <- gather(cwise_bi_cell_count_selected, cond, cellPerc, -c("gene"))
+
+fig2A_core <- ggplot(dataplot, aes(x=cond, y=gene, fill=cellPerc)) +
+  geom_tile() +
+  coord_fixed(ratio = 0.7)+
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90), text = element_text(size=12)) +
+  scale_fill_gradientn(colors=RColorBrewer::brewer.pal(9, "Blues"), na.value = "grey80",
+                       limits=c(0,100)) +
+  scale_x_discrete(position = "top")
+
+verbose_labs <- function(){
+  list(labs(fill="% cells\nbi-allelic", x="Growth media",y="Imprinted genes"))
+}
+
+fig2A_core + verbose_labs()
+
+```
