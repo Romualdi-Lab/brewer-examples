@@ -1,0 +1,228 @@
+---
+title: "Imprinted genes global biallelic status in Female and Male - BrewerIX"
+author: "Paolo Martini"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages(library(rbrewerix))
+suppressPackageStartupMessages(library(ggplot2))
+```
+
+We source the guess_loi_table obtained with the analysis and extract the imprinted genes.
+
+```{r}
+brewer_table <- rbrewerix::read_guess_loi_table("brewer-table.txt.gz")
+igenes_bt <- rbrewerix::extract_chromosomes(brewer_table, chrs = c("X", "Y"), invert_selection = T)
+igenes_bt <- rbrewerix::filter_guess_loi_table(igenes_bt, keep_source = c("A","B"))
+```
+
+From the colnames we extract, select and sort the developmental stages.
+
+```{r}
+type <- sapply(strsplit(colnames(igenes_bt$ref_alt_counts), "_"), function(x) x[1])
+type[grepl("zy", type)] <- "zy"
+
+sorted_stages <- c("zy", "early2cell", "mid2cell", "late2cell",  "4cell", "8cell", "16cell",  "earlyblast", "midblast", "lateblast", "fibroblast", "BXC", "C57twocell")
+
+# Control
+# setdiff(unique(type), sorted_stages)
+
+type <- factor(type, levels=sorted_stages)
+column_order <- order(type)
+pheno <- data.frame(cns = colnames(igenes_bt$ref_alt_counts), type = type, stringsAsFactors = F)[column_order, ]
+
+```
+
+We load also the manual annotation of the female samples obtaioned from the paper (author email).
+
+```{r}
+samples <- read.table(file="sample-annotation.txt", header=F, sep="\t", stringsAsFactors = F, check.names = F)
+
+female_samples <- samples$V1[samples$V2=="female"]
+
+samples_female_fct <- do.call(rbind, lapply(female_samples, function(sample) {
+  idx <- grep(sample, as.character(pheno$cns))
+  pheno[idx, ]
+}))
+
+male_samples <- samples$V1[samples$V2=="male"]
+
+samples_male_fct <- do.call(rbind, lapply(male_samples, function(sample) {
+  idx <- grep(sample, as.character(pheno$cns))
+  pheno[idx, ]
+}))
+drop = (grepl("_smartseq2", as.character(samples_male_fct$cns)) | grepl("pooled_split", as.character(samples_male_fct$cns)))
+
+samples_male_fct = samples_male_fct[!drop, ]
+samples_male_fct_dev_female <- samples_male_fct[samples_male_fct$type %in% samples_female_fct$type, ]
+
+all_samples <- c(samples_male_fct_dev_female$cns, samples_female_fct$cns)
+```
+
+Once we selected the samples of interest, we create the new tables and the gene summary.
+
+```{r}
+
+valid_stages <- c("zy", "early2cell", "mid2cell", "late2cell", "4cell", "8cell", "16cell",  "earlyblast", "midblast", "lateblast", "fibroblast")
+
+pheno <- pheno[as.character(pheno$type) %in% valid_stages, ]
+pheno <- droplevels(pheno)
+igenes_bt_f <- filter_samples_from_guess_loi_table(igenes_bt, keep_samples = pheno$cns)
+
+summarized_genes <- summarize_table_by_genes(igenes_bt_f, thr = 0.2, odepth = 20, min_ac = 4, min_number_of_sig_SNP = 1)
+```
+
+For each developmental stage we summarized each gene average allelic ratio.
+
+```{r}
+# table(pheno$type)
+# mean(table(pheno$type))
+# sum(table(pheno$type))
+# ncell_thr=2
+```
+```{r}
+# cwise_cell_exps_genes <- tapply(pheno$cns, pheno$type, function(idx) {
+#   apply(summarized_genes$gene_all_snvs[, idx,drop=F] > 0, 1, sum, na.rm=T)
+# })
+# 
+# cwise_cell_with_gene_bial <- tapply(pheno$cns, pheno$type, function(idx) {
+#   apply(summarized_genes$gene_aar[, idx,drop=F] >= 0.2, 1, sum, na.rm=T)
+# })
+# 
+# for (name in unique(pheno$type)){
+#   sel <- cwise_cell_exps_genes[[name]] < ncell_thr
+#   cwise_cell_with_gene_bial[[name]][sel] <- 0
+#   cwise_cell_exps_genes[[name]][sel] <- 0
+# }
+# 
+# cwise_bi_cell_count <- mapply('/', cwise_cell_with_gene_bial, cwise_cell_exps_genes, SIMPLIFY = F)
+# cwise_bi_cell_count <- do.call(cbind, cwise_bi_cell_count)
+# cwise_bi_cell_count <- data.frame(gene=summarized_genes$annotation$symbol, cwise_bi_cell_count*100, stringsAsFactors = F, check.names = F)
+# cellPerc = 20
+# 
+# select <- apply(cwise_bi_cell_count[,-1] >= cellPerc, 1, sum, na.rm=T) >= 1 # keep lines with at least one value above cellPerc
+# select[is.na(select)] <- F
+# 
+# cwise_bi_cell_count_selected <- cwise_bi_cell_count[select, ]
+# dim(cwise_bi_cell_count_selected)
+
+```
+
+```{r}
+# control
+# any(duplicated(summarized_genes$annotation$symbol))
+
+aar <- summarized_genes$gene_aar
+row.names(aar) <- summarized_genes$annotation$symbol
+
+esnv <- summarized_genes$gene_all_snvs
+
+igene_biallelic_average <- tapply(pheno$cns, droplevels(pheno$type), function(x) {
+  rowMeans(aar[,x,drop=F])
+})
+
+igene_bi_avg <- data.frame(t(do.call(rbind, igene_biallelic_average)), check.names = F)
+
+sorted_annotation <- summarized_genes$annotation[order(summarized_genes$annotation$chr,summarized_genes$annotation$TSS), ]
+
+igene_bi_avg <- igene_bi_avg[sorted_annotation$symbol, ]
+table_igene_bi_avg <- data.frame(gene=row.names(igene_bi_avg), igene_bi_avg, stringsAsFactors = F)
+# write.table(table_igene_bi_avg, file="table_igene_bi_avg_fig-2c.txt", sep="\t", quote=F, row.names=F)
+
+igene_bi_avg$gene <- row.names(igene_bi_avg)
+
+```
+
+We procede to the plot.
+
+```{r}
+
+dotplot <- tidyr::gather(igene_bi_avg, stage, AAR, -c("gene"))
+dotplot$stage <- factor(as.character(dotplot$stage), levels=valid_stages)
+dotplot$gene <- factor(as.character(dotplot$gene), levels=sorted_annotation$symbol)
+
+pos <- position_jitter(width = 0.3, seed = 3)
+```
+
+```{r}
+plot <- ggplot(dotplot, aes(x=stage, y=AAR, color=AAR, group=stage)) +
+  geom_jitter(position = pos) +
+  geom_violin(fill="#0097e6") +
+  theme_classic() +
+  theme(axis.text.x = element_text(size=11.5, angle = 45,
+                                   hjust = 1, vjust = 0.9),
+        axis.title.x = element_text(size=12),
+        legend.justification="top") +
+  scale_colour_gradient(low = "grey80", high = "yellow",
+                        space = "Lab", aesthetics = "colour", 
+                        breaks=c(0,0.2,0.4,0.6), labels=c("0","","","0.6")) +
+  labs(fill="AAR", x="Stages of mouse development", y="AAR") +
+  scale_fill_discrete(guide='none') + 
+  scale_alpha_continuous(guide='none') +
+  scale_size_continuous(guide='none') + 
+  geom_hline(yintercept=0.2, color = "orange", alpha=0.4, size=2) + 
+  guides(colour=guide_colourbar(barheight = 2))
+
+library(ggrepel)
+fig2c <- plot +
+  geom_text_repel(aes(label=ifelse(AAR>=0.2, as.character(gene), '')), 
+                  color="black", 
+                  position = pos, size=2.5,
+                  box.padding = unit(0.1, 'lines'),
+                  point.padding = unit(0.1, 'lines'),
+                  segment.color = '#cccccc',
+                  min.segment.length = 0.2,
+                  arrow = arrow(length = unit(0.01, 'npc')),
+                  force = 1,
+                  max.iter = 3e3)
+
+fig2c
+```
+
+# Create heatmap
+
+```{r}
+sort_esnv <- esnv[, pheno$cns]
+sort_aar <- aar[, pheno$cns]
+
+sort_aar[sort_esnv==0] <-NA
+
+sort_aar <- data.frame(gene=row.names(sort_aar), sort_aar, check.names = F)
+sort_aar[1:6,1:6]
+
+dataset <- tidyr::gather(sort_aar, cell_stage, AR, -c(gene))
+dataset$cell_stage <- factor(dataset$cell_stage, levels=pheno$cns)
+
+colors <- RColorBrewer::brewer.pal(9, "Set1")
+low = colors[1]
+mid = colors[6]
+high = colors[1]
+
+labels <- as.character(pheno$type)
+labels[duplicated(labels)] <- ""
+ticks_colors <- rep("black", length(labels))
+ticks_colors[labels==""] <- "transparent"
+
+labels <- c("", labels[-c(length(labels))])
+
+s_fig_7 <- ggplot(dataset, aes(x=cell_stage, y=gene, color=AR)) +
+  theme_classic() +
+  geom_point(size=1) +
+  theme(axis.line=element_blank(), 
+        axis.text.y = element_text(size=6),
+        axis.text.x = element_text(size=6, angle=90, vjust = 1), axis.ticks = element_blank()) +
+  scale_colour_gradient2(low = low, mid = mid, high = high, midpoint = 0.5, space = "Lab",
+                         na.value = colors[9], guide = "colourbar", aesthetics = "color") +
+  labs(color = "AR", x="Stages of mouse development", y="Imprinted genes") +
+  scale_x_discrete(labels=labels) +
+  theme(axis.ticks.x = element_line(color=ticks_colors))
+
+s_fig_7
+```
+

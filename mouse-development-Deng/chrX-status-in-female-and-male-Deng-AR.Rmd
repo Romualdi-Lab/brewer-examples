@@ -1,0 +1,177 @@
+---
+title: "ChrX global biallelic status in Female and Male - Deng AR"
+author: "Paolo Martini"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We load the data we downloaded from the processed set in GSE45719. Some labels are duplicated and the second occurrence has been removed.
+
+```{r}
+data <- read.table("Deng-alleic-expression-for-X-genes.txt.gz", header=T, sep="\t", 
+                   check.names = F, stringsAsFactors = F)
+
+duplicated <- unique(data$label[which(duplicated(data$label))])
+data <- data[!(data$label %in% duplicated), , drop=F]
+row.names(data) <- data$label
+data$label <- NULL
+
+valid_genes <- read.table("genes_shared_in_chrX.txt", sep="\t", header=F, stringsAsFactors = F)$V1
+data <- data[valid_genes, , drop=F]
+if (any(is.na(row.names(data)))) stop()
+```
+
+From column names we are going to retrieve the stage.
+
+```{r}
+type <- sapply(strsplit(colnames(data), "_"), function(x) x[1])
+sorted_stages <- c("zy1", "zy2", "zy3", "zy4", "early2cell", "late2cell", "mid2cell", "4cell", "8cell", "16cell",  "earlyblast", "midblast", "lateblast", "fibroblast", "BXC", "C57twocell")
+setdiff(unique(type), sorted_stages)
+
+type <- factor(type, levels=sorted_stages)
+column_order <- order(type)
+pheno <- data.frame(cns = colnames(data), type = type, stringsAsFactors = F)[column_order, ]
+
+```
+
+We retrieve by email of the author the sex of some samples.
+
+```{r}
+samples <- read.table(file="sample-annotation.txt", header=F, sep="\t", stringsAsFactors = F, check.names = F)
+
+female_samples <- samples$V1[samples$V2=="female"]
+samples_female <- unique(unlist(lapply(female_samples, function(sample) {
+  idx <- grep(sample, as.character(pheno$cns))
+  as.character(pheno$cns)[idx]
+})))
+
+samples_female_fct <- do.call(rbind, lapply(female_samples, function(sample) {
+  idx <- grep(sample, as.character(pheno$cns))
+  pheno[idx, ]
+}))
+levels(samples_female_fct$type)
+
+male_samples <- samples$V1[samples$V2=="male"]
+samples_male <- unique(unlist(lapply(male_samples, function(sample) {
+  idx <- grep(sample, as.character(pheno$cns))
+  as.character(pheno$cns)[idx]
+})))
+
+samples_male_fct <- do.call(rbind, lapply(male_samples, function(sample) {
+  idx <- grep(sample, as.character(pheno$cns))
+  pheno[idx, ]
+}))
+
+drop = (grepl("_smartseq2", as.character(samples_male_fct$cns)) | grepl("pooled_split", as.character(samples_male_fct$cns)))
+
+samples_male_fct = samples_male_fct[!drop, ]
+samples_male_fct_dev_female <- samples_male_fct[samples_male_fct$type %in% samples_female_fct$type, ]
+
+all_samples <- c(samples_male_fct_dev_female$cns, samples_female_fct$cns)
+```
+
+Now we shrink the data accordingly.
+
+```{r}
+data <- data[, all_samples, drop=F]
+```
+
+We can compute the ratio _(ratio of the first in the total)_
+
+```{r}
+ratios_global_tot <- sapply(data, function(x) {
+  mat <- do.call(rbind, strsplit(x, ","))
+  sum(as.numeric(mat[,2]))/sum(as.numeric(mat[,1]))
+})
+```
+
+```{r}
+library(ggplot2)
+
+female <- data.frame(meanAR = ratios_global_tot[samples_female_fct$cns],
+                     group="Female", stage=samples_female_fct$type)
+female <- droplevels(female)
+female <- tapply(female$meanAR, female$stage, mean)
+female <- data.frame(meanAR=female, stage=names(female), group="Female")
+
+male <- data.frame(meanAR = ratios_global_tot[samples_male_fct_dev_female$cns], group="Male", stage=samples_male_fct_dev_female$type)
+male <- droplevels(male)
+male <- tapply(male$meanAR, male$stage, mean)
+male <- data.frame(meanAR=male, stage=names(male), group="Male")
+
+overall_mean_AR <- rbind(female, male)
+overall_mean_AR$stage <- factor(as.character(overall_mean_AR$stage), levels=c("mid2cell", "late2cell", "4cell", "16cell", "earlyblast"))
+
+ggplot(overall_mean_AR, aes(x=stage, y=meanAR, group=group, color=group)) +
+  geom_line() +
+  theme_classic() +
+  ylim(c(0,1))
+
+```
+
+# Create heatmap of AR
+
+```{r}
+ratios <- sapply(data, function(x) {
+  sapply(strsplit(x, ","), function(y) {
+    ac <- as.numeric(y)
+    if (all(ac==0))
+      return(NA)
+    ac[1]/sum(ac)
+  })
+})
+row.names(ratios) <- row.names(data)
+```
+
+We remove the line with all NAs.
+
+```{r}
+ratios <- ratios[!apply(is.na(ratios), 1, all), ]
+```
+
+```{r}
+gene_positions_ad <- read.table("symbol2tss.txt", header=F, check.names = F, stringsAsFactors = F, strip.white = F)
+colnames(gene_positions_ad) <- c("symbol", "chr", "tss")
+
+female_data <- ratios[, samples_female_fct$cns]
+female_data <- data.frame(gene=row.names(female_data), female_data, check.names = F)
+
+xgene_positions <- gene_positions_ad[gene_positions_ad$symbol %in% row.names(female_data),  ]
+sort_x_genes <- xgene_positions$symbol[order(xgene_positions$tss)]
+
+female_data$gene <- factor(as.character(female_data$gene), levels = sort_x_genes)
+
+dataset <- tidyr::gather(female_data, cell_stage, AR, -c(gene))
+dataset$cell_stage <- factor(dataset$cell_stage, levels=rev(samples_female_fct$cns))
+
+colors <- RColorBrewer::brewer.pal(9, "Set1")
+low = colors[1]
+mid = colors[6]
+high = colors[1]
+
+labels <- rev(as.character(samples_female_fct$type))
+labels[duplicated(labels)] <- ""
+ticks_colors <- rep("black", length(labels))
+ticks_colors[labels==""] <- "transparent"
+
+labels <- c("", labels[-c(length(labels))])
+
+s_fig_6a <- ggplot(dataset, aes(y=cell_stage, x=gene, color=AR)) +
+  theme_classic() +
+  geom_point(size=ifelse(is.na(dataset$AR), 0.1, 1)) +
+  theme(axis.line=element_blank(), 
+        axis.text.y = element_text(size=6),
+        axis.text.x = element_text(size=2, angle=90), axis.ticks = element_blank(),
+        axis.ticks.x = element_blank()) +
+  scale_colour_gradient2(low = low, mid = mid, high = high, midpoint = 0.5, space = "Lab",
+                         na.value = colors[9], guide = "colourbar", aesthetics = "color") +
+  labs(color = "AR", y="Stages of mouse development", x="Chromosome X genes") +
+  scale_y_discrete(labels=labels) +
+  theme(axis.ticks.y = element_line(color=ticks_colors))
+
+s_fig_6a
+```
